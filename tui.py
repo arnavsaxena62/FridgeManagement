@@ -5,42 +5,15 @@ from recipe_api import search_recipes
 import database
 
 
-def render_recipe(stdscr, recipe, index, total):
-    stdscr.clear()
+def build_recipe_lines(recipe, width):
+    lines = []
 
-    height, width = stdscr.getmaxyx()
-
-    def write(y, text, attr=0):
-        if 0 <= y < height - 1:
-            try:
-                stdscr.addnstr(
-                    y, 2, str(text),
-                    max(0, width - 4),
-                    attr
-                )
-            except curses.error:
-                pass
-
-    write(0, " RECIPE FINDER ")
-    write(2, f"{index + 1}/{total} recipes")
-
-    title = recipe.get("name", "Untitled").upper()
-
-    write(4, title)
-
-    write(5, "=" * min(width - 4, 60))
-
-    y = 7
     description = recipe.get("description", "No description")
+    for line in textwrap.wrap(description, max(1, width - 6)):
+        lines.append((line, 0))
 
-    for line in textwrap.wrap(description, width - 6):
-        write(y, line)
-        y += 1
-
-    y += 1
-
-    write(y, "RECIPE INFORMATION", curses.A_BOLD)
-    y += 1
+    lines.append(("", 0))
+    lines.append(("RECIPE INFORMATION", curses.A_BOLD))
 
     info = [
         f"Cuisine: {recipe.get('cuisine', 'N/A')}",
@@ -54,13 +27,10 @@ def render_recipe(stdscr, recipe, index, total):
     ]
 
     for item in info:
-        write(y, item)
-        y += 1
+        lines.append((item, 0))
 
-    y += 1
-
-    write(y, "INGREDIENTS", curses.A_BOLD)
-    y += 1
+    lines.append(("", 0))
+    lines.append(("INGREDIENTS", curses.A_BOLD))
 
     for ingredient in recipe.get("ingredients", []):
         if not isinstance(ingredient, dict):
@@ -69,36 +39,76 @@ def render_recipe(stdscr, recipe, index, total):
         quantity = ingredient.get("quantity", "")
         unit = ingredient.get("unit", "")
         name = ingredient.get("name", "Unknown")
-
         optional = " (optional)" if ingredient.get("optional") else ""
 
-        write(y, f"  - {quantity} {unit} {name}{optional}")
-        y += 1
+        lines.append((f"  - {quantity} {unit} {name}{optional}", 0))
 
-    y += 1
-
-    write(y, "INSTRUCTIONS", curses.A_BOLD)
-    y += 1
+    lines.append(("", 0))
+    lines.append(("INSTRUCTIONS", curses.A_BOLD))
 
     for i, instruction in enumerate(recipe.get("instructions", []), 1):
-        wrapped = textwrap.wrap(instruction, width - 8)
+        wrapped = textwrap.wrap(str(instruction), max(1, width - 8))
 
         for j, line in enumerate(wrapped):
             prefix = f"{i}. " if j == 0 else "   "
-            write(y, prefix + line)
-            y += 1
+            lines.append((prefix + line, 0))
 
-    footer = " UP/DOWN: Navigate | Q: Quit "
+    return lines
 
 
-    stdscr.addnstr(
-        height - 1, 
-        0,
-        footer.ljust(width - 1),
-        width - 1
-    )
+def render_recipe(stdscr, recipe, index, total, scroll):
+    stdscr.clear()
+
+    height, width = stdscr.getmaxyx()
+
+    def write(y, text, attr=0):
+        if 0 <= y < height - 1:
+            try:
+                stdscr.addnstr(y, 2, str(text), max(0, width - 4), attr)
+            except curses.error:
+                pass
+
+    write(0, " RECIPE FINDER ")
+    write(2, f"{index + 1}/{total} recipes")
+
+    title = recipe.get("name", "Untitled").upper()
+
+    write(4, title)
+    write(5, "=" * max(0, min(width - 4, 60)))
+
+    body = build_recipe_lines(recipe, width)
+
+    top = 7
+    bottom = height - 1
+    viewport = max(0, bottom - top)
+    max_scroll = max(0, len(body) - viewport)
+    scroll = max(0, min(scroll, max_scroll))
+
+    for offset in range(viewport):
+        pos = scroll + offset
+
+        if pos >= len(body):
+            break
+
+        text, attr = body[pos]
+        write(top + offset, text, attr)
+
+    footer = " UP/DOWN: Scroll | LEFT/RIGHT: Recipes | Q: Quit "
+
+    indicators = []
+    if scroll > 0:
+        indicators.append("more above")
+    if scroll < max_scroll:
+        indicators.append("more below")
+
+    if indicators:
+        footer += " | " + " | ".join(indicators)
+
+    stdscr.addnstr(height - 1, 0, footer.ljust(width - 1), width - 1)
 
     stdscr.refresh()
+
+    return scroll
 
 
 def run(stdscr):
@@ -137,9 +147,10 @@ def run(stdscr):
         return
 
     index = 0
+    scroll = 0
 
     while True:
-        render_recipe(stdscr, recipes[index], index, len(recipes))
+        scroll = render_recipe(stdscr, recipes[index], index, len(recipes), scroll)
 
         key = stdscr.getch()
 
@@ -147,8 +158,20 @@ def run(stdscr):
             break
 
         elif key == curses.KEY_DOWN:
+            scroll += 1
+
+        elif key == curses.KEY_UP:
+            scroll -= 1
+
+        elif key == curses.KEY_LEFT:
+            if index > 0:
+                index -= 1
+                scroll = 0
+
+        elif key == curses.KEY_RIGHT:
             if index < len(recipes) - 1:
                 index += 1
+                scroll = 0
 
             elif has_next and not loading:
                 loading = True
@@ -160,10 +183,7 @@ def run(stdscr):
                 try:
                     next_page = page + 1
 
-                    response = search_recipes(
-                        ingredients,
-                        page=next_page
-                    )
+                    response = search_recipes(ingredients, page=next_page)
 
                     new_recipes = response.get("data", [])
 
@@ -171,10 +191,9 @@ def run(stdscr):
                         recipes.extend(new_recipes)
                         page = next_page
                         index += 1
+                        scroll = 0
 
-                    has_next = (
-                        response.get("links", {}).get("next") is not None
-                    )
+                    has_next = response.get("links", {}).get("next") is not None
 
                 except Exception as e:
                     stdscr.clear()
@@ -183,10 +202,6 @@ def run(stdscr):
 
                 finally:
                     loading = False
-
-        elif key == curses.KEY_UP:
-            if index > 0:
-                index -= 1
 
 
 def main():
